@@ -7,6 +7,12 @@ const landmarkSchema = new mongoose.Schema({
   visibility: Number,
 }, { _id: false });
 
+const imageMetadataSchema = new mongoose.Schema({
+  width: Number,
+  height: Number,
+  contentType: String,
+}, { _id: false });
+
 const viewResultSchema = new mongoose.Schema({
   position: String,
   label: String,
@@ -39,6 +45,7 @@ const bodyAnalysisSchema = new mongoose.Schema({
   landmarks: { type: [landmarkSchema], default: [] },
   viewResults: { type: [viewResultSchema], default: [] },
   images: { front: String, back: String, left: String, right: String },
+  imageMetadata: { front: imageMetadataSchema, back: imageMetadataSchema, left: imageMetadataSchema, right: imageMetadataSchema },
   moderationStatus: { type: String, enum: ['Pending', 'Approved', 'Flagged', 'Deleted'], default: 'Pending', index: true },
   moderationReason: { type: String, default: '' },
   moderatedAt: { type: Date, default: null },

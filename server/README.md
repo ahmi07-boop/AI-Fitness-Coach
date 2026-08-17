@@ -113,13 +113,17 @@ The password must be at least 8 characters. After resetting, sign in again with 
 - JWT verification is restricted to HS256 and requires a strong `JWT_SECRET`.
 - Admin APIs require JWT + admin role; the last active admin cannot be deactivated, banned, or demoted.
 - User account states are persisted separately as `active`, `inactive`, or `banned`.
-- MongoDB is the authoritative source for daily progress, habits, nutrition, water, workouts and progress photos.
+- MongoDB is the authoritative source for daily progress, habits, nutrition, water, workouts and file metadata.
+- User-uploaded images are stored in MongoDB GridFS (`MONGO_FILE_BUCKET`) instead of Railway's ephemeral filesystem; profile, body-analysis, moderation and progress-photo retrieval all use the same storage layer.
+- New image uploads are normalized to WebP and EXIF metadata is stripped before persistence; legacy local paths remain readable only when the legacy file still exists.
+- Run `npm run migrate:file-storage` once in an environment that still has legacy `server/uploads` files to move them into GridFS without changing their MongoDB records' logical ownership.
 - Workout completion is validated server-side against the user's current plan and authoritative exercise IDs.
 - Progress uses a unique `(user, date)` index; run `npm run migrate:progress-index` once against an existing database before enabling the unique index if legacy duplicates exist.
 - Date-only tracking uses `APP_TIMEZONE` on the server and `VITE_APP_TIMEZONE` on the client. Use the same IANA timezone in both environments.
 - Image moderation receives the actual uploaded MIME type instead of inferring it from temporary filenames.
-- Runtime secrets and user uploads are never included in the source archive. Copy `.env.example` to `.env` locally or use a secret manager.
+- Runtime secrets and user uploads are never included in the source archive. Copy `.env.example` to `.env` locally or use Railway Variables/a secret manager.
 - Generated `client/dist` artifacts are excluded from the source archive; deployment should run a clean client build.
+- Do not commit `.env` files or real user/body/progress uploads. Rotate any credentials that were ever exposed in a repository, ZIP, screenshot or log.
 
 ## Validation
 

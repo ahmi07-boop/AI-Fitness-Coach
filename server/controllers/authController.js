@@ -5,6 +5,7 @@ const AdminLog = require('../models/AdminLog');
 const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
+const { uploadBuffer, getFile, openDownloadStream, deleteFile, isStoredFileId } = require('../services/storageService');
 const AUTH_COOKIE = 'fitcoach_session';
 
 function setAuthCookie(res, token) {
@@ -94,30 +95,36 @@ async function me(req, res) {
 }
 
 async function uploadAvatar(req, res) {
-  if (!req.file) {
+  if (!req.file?.buffer) {
     return res.status(400).json({ success: false, message: 'A profile picture is required.' });
   }
 
-  const avatarDirectory = path.join(__dirname, '..', 'uploads', 'profiles');
-  fs.mkdirSync(avatarDirectory, { recursive: true });
-  const filename = `${String(req.user._id)}-${Date.now()}.webp`;
-  const outputPath = path.join(avatarDirectory, filename);
+  const previousFileId = req.user.profile?.avatarPath;
 
   try {
-    await sharp(req.file.path)
+    const optimizedBuffer = await sharp(req.file.buffer, { failOn: 'error' })
       .rotate()
       .resize(512, 512, { fit: 'cover', position: 'centre' })
       .webp({ quality: 86 })
-      .toFile(outputPath);
+      .toBuffer();
 
-    const previousFilename = req.user.profile?.avatarPath;
-    req.user.profile.avatarPath = filename;
+    const stored = await uploadBuffer(optimizedBuffer, {
+      filename: `${String(req.user._id)}-${Date.now()}.webp`,
+      contentType: 'image/webp',
+      metadata: {
+        ownerUserId: String(req.user._id),
+        purpose: 'profile-avatar',
+      },
+    });
+
+    req.user.profile.avatarPath = stored.fileId;
     await req.user.save();
 
-    if (previousFilename && previousFilename !== filename) {
-      fs.unlink(path.join(avatarDirectory, path.basename(previousFilename)), () => {});
+    if (previousFileId && isStoredFileId(previousFileId)) {
+      await deleteFile(previousFileId).catch((error) => {
+        console.warn('Previous avatar cleanup failed:', error.message);
+      });
     }
-    fs.unlink(req.file.path, () => {});
 
     return res.json({
       success: true,
@@ -125,19 +132,42 @@ async function uploadAvatar(req, res) {
       data: { user: publicUser(req.user) },
     });
   } catch (error) {
-    fs.unlink(req.file.path, () => {});
     throw error;
   }
 }
 
 async function getAvatar(req, res) {
-  const avatarFilename = req.user.profile?.avatarPath;
+  const avatarFileId = req.user.profile?.avatarPath;
+
+  if (isStoredFileId(avatarFileId)) {
+    const file = await getFile(avatarFileId);
+    if (!file) {
+      return res.status(404).json({ success: false, message: 'Profile picture not found.' });
+    }
+
+    res.setHeader('Content-Type', file.contentType || 'image/webp');
+    res.setHeader('Content-Length', String(file.length));
+    res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+
+    const stream = openDownloadStream(avatarFileId);
+    stream.on('error', (error) => {
+      if (!res.headersSent) {
+        res.status(404).json({ success: false, message: 'Profile picture not found.' });
+      } else {
+        res.destroy(error);
+      }
+    });
+    return stream.pipe(res);
+  }
+
+  // Backward-compatible fallback for legacy local files. New uploads never use
+  // the Railway filesystem.
   const avatarDirectory = path.join(__dirname, '..', 'uploads', 'profiles');
-  const avatarPath = avatarFilename ? path.join(avatarDirectory, path.basename(avatarFilename)) : null;
+  const avatarPath = avatarFileId ? path.join(avatarDirectory, path.basename(avatarFileId)) : null;
   if (!avatarPath || !fs.existsSync(avatarPath)) {
     return res.status(404).json({ success: false, message: 'Profile picture not found.' });
   }
-  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
   return res.sendFile(path.resolve(avatarPath));
 }
 

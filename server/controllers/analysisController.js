@@ -1,7 +1,7 @@
 const BodyAnalysis = require('../models/BodyAnalysis');
 const { analyzeImages } = require('../services/mediapipeService');
 const { moderateImage } = require('../services/imageModerationService');
-const fs = require('fs');
+const { uploadBuffer, deleteFile } = require('../services/storageService');
 const sharp = require('sharp');
 
 function parseLandmarkViews(value) {
@@ -17,7 +17,7 @@ function parseLandmarkViews(value) {
 
 
 async function validateUploadedImage(file) {
-  const metadata = await sharp(file.path, { failOn: 'error' }).metadata();
+  const metadata = await sharp(file.buffer, { failOn: 'error' }).metadata();
   const width = Number(metadata.width || 0);
   const height = Number(metadata.height || 0);
   const pixels = width * height;
@@ -32,6 +32,7 @@ async function validateUploadedImage(file) {
 
   return { width, height, format: metadata.format };
 }
+
 
 function validateLandmarkViews(viewResults) {
   if (!Array.isArray(viewResults) || viewResults.length !== 4) {
@@ -87,13 +88,9 @@ function validateLandmarkViews(viewResults) {
   }
 }
 
-function removeUploadedFiles(files = []) {
-  for (const file of files) {
-    if (file?.path) fs.unlink(file.path, () => {});
-  }
-}
-
 exports.bodyAnalysis = async (req, res) => {
+  const uploadedFileIds = [];
+
   try {
     const heightCm = Number(req.body.heightCm ?? req.user.profile?.heightCm);
     const weightKg = Number(req.body.weightKg ?? req.user.profile?.weightKg);
@@ -111,16 +108,9 @@ exports.bodyAnalysis = async (req, res) => {
     }
 
     const files = [];
-    const imagePaths = {};
-
     for (const position of ['front', 'back', 'left', 'right']) {
       const file = req.files?.[position]?.[0];
-      if (file) {
-        files.push(file);
-        imagePaths[position] = file.path || file.filename || '';
-      } else {
-        imagePaths[position] = '';
-      }
+      if (file) files.push({ position, file });
     }
 
     if (files.length !== 4) {
@@ -131,26 +121,35 @@ exports.bodyAnalysis = async (req, res) => {
     }
 
     validateLandmarkViews(landmarkViews);
-    const imageMetadata = await Promise.all(files.map(validateUploadedImage));
+    const imageMetadata = await Promise.all(files.map(({ file }) => validateUploadedImage(file)));
 
-    const result = await analyzeImages(files, heightCm, weightKg, landmarkViews);
+    // Normalize all body photos to WebP. This strips EXIF/GPS metadata, keeps
+    // the stored format consistent, and makes retrieval independent of Railway's
+    // ephemeral filesystem.
+    const normalizedFiles = await Promise.all(files.map(async ({ position, file }) => {
+      const buffer = await sharp(file.buffer, { failOn: 'error' })
+        .rotate()
+        .webp({ quality: 88 })
+        .toBuffer();
+
+      return {
+        position,
+        buffer,
+        mimeType: 'image/webp',
+        originalMimeType: file.mimetype,
+      };
+    }));
+
+    const result = await analyzeImages(files.map(({ file }) => file), heightCm, weightKg, landmarkViews);
 
     let moderationStatus = 'Pending';
     let moderationReason = 'Manual review required.';
+
     try {
       const moderationResults = await Promise.all(
-        files.map((file, index) => {
-          const detectedFormat = imageMetadata[index]?.format;
-          const detectedMime = detectedFormat === 'jpeg'
-            ? 'image/jpeg'
-            : detectedFormat === 'png'
-              ? 'image/png'
-              : detectedFormat === 'webp'
-                ? 'image/webp'
-                : '';
-          return moderateImage(file.path, detectedMime);
-        })
+        normalizedFiles.map((item) => moderateImage(item.buffer, item.mimeType))
       );
+
       if (moderationResults.some((item) => item.status === 'Flagged')) {
         moderationStatus = 'Flagged';
         moderationReason = moderationResults.find((item) => item.status === 'Flagged')?.reason || moderationReason;
@@ -160,6 +159,22 @@ exports.bodyAnalysis = async (req, res) => {
       }
     } catch (moderationError) {
       console.warn('Image moderation unavailable; leaving upload pending:', moderationError.message);
+    }
+
+    const imagePaths = {};
+    for (const item of normalizedFiles) {
+      const stored = await uploadBuffer(item.buffer, {
+        filename: `${String(req.user._id)}-${item.position}-${Date.now()}.webp`,
+        contentType: item.mimeType,
+        metadata: {
+          ownerUserId: String(req.user._id),
+          purpose: `body-analysis-${item.position}`,
+          moderationStatus,
+        },
+      });
+
+      uploadedFileIds.push(stored.fileId);
+      imagePaths[item.position] = stored.fileId;
     }
 
     const analysis = await BodyAnalysis.create({
@@ -181,6 +196,14 @@ exports.bodyAnalysis = async (req, res) => {
       moderationStatus,
       moderationReason,
       moderatedAt: moderationStatus === 'Pending' ? null : new Date(),
+      imageMetadata: normalizedFiles.reduce((acc, item, index) => {
+        acc[item.position] = {
+          width: imageMetadata[index]?.width,
+          height: imageMetadata[index]?.height,
+          contentType: item.mimeType,
+        };
+        return acc;
+      }, {}),
     });
 
     return res.status(201).json({
@@ -189,7 +212,8 @@ exports.bodyAnalysis = async (req, res) => {
       data: analysis,
     });
   } catch (error) {
-    removeUploadedFiles(Object.values(req.files || {}).flat());
+    await Promise.all(uploadedFileIds.map((fileId) => deleteFile(fileId).catch(() => {})));
+
     console.error('Body analysis error:', error);
     const status = /required|invalid|exactly four|landmark|image/i.test(error.message || '') ? 400 : 500;
     return res.status(status).json({

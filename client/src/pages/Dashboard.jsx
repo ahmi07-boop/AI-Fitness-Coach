@@ -70,7 +70,7 @@ function calculateFitnessScore(analysis, habitProgress, workoutCount) {
 
 function Dashboard() {
   const sidebarRef = useRef(null);
-  const { showTopShadow, showBottomShadow } = useScrollShadows(sidebarRef);
+  useScrollShadows(sidebarRef);
 
   const navigate = useNavigate();
   const { user, logout } = useAuth();

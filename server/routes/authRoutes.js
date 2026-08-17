@@ -1,17 +1,12 @@
 const router = require('express').Router();
 const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
 const { verifyJWT } = require('../middleware/auth');
 const { createRateLimiter } = require('../middleware/security');
 const { register, login, me, updateProfile, uploadAvatar, getAvatar, clearAuthCookie } = require('../controllers/authController');
 
-const avatarUploadDirectory = path.join(__dirname, '..', 'uploads', 'profiles-temp');
-fs.mkdirSync(avatarUploadDirectory, { recursive: true });
-
 const avatarUpload = multer({
-  dest: avatarUploadDirectory,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 4, parts: 6 },
   fileFilter: (req, file, cb) => {
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
       return cb(new Error('Only JPG, PNG, and WebP profile pictures are supported.'));

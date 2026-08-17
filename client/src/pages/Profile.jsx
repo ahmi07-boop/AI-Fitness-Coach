@@ -14,7 +14,7 @@ const goals = {
 
 function Profile() {
   const sidebarRef = useRef(null);
-  const { showTopShadow, showBottomShadow } = useScrollShadows(sidebarRef);
+  useScrollShadows(sidebarRef);
 
   const navigate = useNavigate();
   const { user: authUser, updateProfile, uploadProfilePicture } = useAuth();

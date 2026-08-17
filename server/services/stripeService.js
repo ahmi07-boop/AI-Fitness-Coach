@@ -3,7 +3,7 @@ const Stripe = require('stripe');
 let stripeClient;
 
 function getStripe() {
-  const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
+  const secretKey = process.env.STRIPE_SECRET_KEY?.replace(/\s+/g, '');
 
   if (!secretKey) {
     const error = new Error(

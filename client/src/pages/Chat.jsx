@@ -22,7 +22,7 @@ import {
 
 function Chat() {
   const sidebarRef = useRef(null);
-  const { showTopShadow, showBottomShadow } = useScrollShadows(sidebarRef);
+  useScrollShadows(sidebarRef);
 
   const navigate = useNavigate();
   const { user: authUser } = useAuth();

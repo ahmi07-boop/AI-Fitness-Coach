@@ -11,7 +11,8 @@
     "reset-password": "node scripts/reset-password.js",
     "migrate:progress-index": "node scripts/dedupe-progress-dates.js",
     "test": "node --test tests/*.test.js",
-    "test:enterprise": "node --test tests/enterprise-contract.test.js"
+    "test:enterprise": "node --test tests/enterprise-contract.test.js",
+    "migrate:file-storage": "node scripts/migrate-file-storage.js"
   },
   "keywords": [],
   "author": "",

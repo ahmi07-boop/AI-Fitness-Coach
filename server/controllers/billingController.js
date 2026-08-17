@@ -49,7 +49,7 @@ async function handleSubscription(user, subscription) {
 
 async function webhook(req, res) {
   const signature = req.headers['stripe-signature'];
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  const secret = process.env.STRIPE_WEBHOOK_SECRET?.replace(/\s+/g, '');
   if (!secret) return res.status(503).send('Stripe webhook is not configured.');
 
   let event;

@@ -3,6 +3,10 @@ const Plan = require('../models/Plan');
 const OpenAI = require('openai');
 const AIUsageLog = require('../models/AIUsageLog');
 const { normalizeDay, dayKey, getCurrentWeekRange } = require('../utils/date');
+const sharp = require('sharp');
+const path = require('path');
+const fs = require('fs');
+const { uploadBuffer, getFile, openDownloadStream, deleteFile, isStoredFileId } = require('../services/storageService');
 
 const aiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const INSIGHT_MODEL = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -91,27 +95,115 @@ async function getWeeklyInsights(req, res) {
 
 async function uploadProgressPhoto(req, res) {
   const type = req.body?.type;
-  if (!['before', 'current'].includes(type)) return res.status(400).json({ success: false, message: 'type must be before or current.' });
+  if (!['before', 'current'].includes(type)) {
+    return res.status(400).json({ success: false, message: 'type must be before or current.' });
+  }
+
   const file = req.file;
-  if (!file) return res.status(400).json({ success: false, message: 'A photo file is required.' });
+  if (!file?.buffer) {
+    return res.status(400).json({ success: false, message: 'A photo file is required.' });
+  }
+
   const date = normalizeDay(req.body?.date || new Date());
-  const entry = await Progress.findOneAndUpdate(
-    { user: req.user._id, date },
-    { $setOnInsert: { user: req.user._id, date }, $set: { [`photos.${type}`]: { path: file.path, uploadedAt: new Date() } } },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
-  );
-  res.status(201).json({ success: true, message: 'Progress photo saved.', data: { progress: entry } });
+
+  try {
+    const metadata = await sharp(file.buffer, { failOn: 'error' }).metadata();
+    const width = Number(metadata.width || 0);
+    const height = Number(metadata.height || 0);
+    if (!width || !height || width * height > 25_000_000 || Math.min(width, height) < 240) {
+      return res.status(400).json({
+        success: false,
+        message: 'Progress photo must be a valid image, at least 240 pixels on its shortest side, and no more than 25 megapixels.',
+      });
+    }
+
+    const normalizedBuffer = await sharp(file.buffer, { failOn: 'error' })
+      .rotate()
+      .webp({ quality: 88 })
+      .toBuffer();
+
+    const stored = await uploadBuffer(normalizedBuffer, {
+      filename: `${String(req.user._id)}-${date.toISOString().slice(0, 10)}-${type}-${Date.now()}.webp`,
+      contentType: 'image/webp',
+      metadata: {
+        ownerUserId: String(req.user._id),
+        purpose: `progress-${type}`,
+        progressDate: date.toISOString().slice(0, 10),
+      },
+    });
+
+    const existing = await Progress.findOne({ user: req.user._id, date }).select(`photos.${type}`).lean();
+    const previousFileId = existing?.photos?.[type]?.path;
+
+    const entry = await Progress.findOneAndUpdate(
+      { user: req.user._id, date },
+      {
+        $setOnInsert: { user: req.user._id, date },
+        $set: { [`photos.${type}`]: { path: stored.fileId, uploadedAt: new Date() } },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    );
+
+    if (previousFileId && isStoredFileId(previousFileId) && previousFileId !== stored.fileId) {
+      await deleteFile(previousFileId).catch((error) => {
+        console.warn('Previous progress photo cleanup failed:', error.message);
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Progress photo saved.',
+      data: { progress: entry },
+    });
+  } catch (error) {
+    throw error;
+  }
 }
 
 async function getProgressPhoto(req, res) {
+  const type = String(req.params.type || '').toLowerCase();
+  if (!['before', 'current'].includes(type)) {
+    return res.status(400).json({ success: false, message: 'Invalid progress photo type.' });
+  }
+
   const entry = await Progress.findById(req.params.id).select('user photos').lean();
   if (!entry) return res.status(404).json({ success: false, message: 'Progress entry not found.' });
-  if (String(entry.user) !== String(req.user._id) && req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access denied.' });
-  const filePath = entry.photos?.[req.params.type]?.path;
-  if (!filePath) return res.status(404).json({ success: false, message: 'Progress photo not found.' });
-  return res.sendFile(require('path').resolve(filePath), (error) => {
-    if (error && !res.headersSent) res.status(404).json({ success: false, message: 'Progress photo not found.' });
-  });
+  if (String(entry.user) !== String(req.user._id) && req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Access denied.' });
+  }
+
+  const storedFileId = entry.photos?.[type]?.path;
+  if (!storedFileId) return res.status(404).json({ success: false, message: 'Progress photo not found.' });
+
+  if (isStoredFileId(storedFileId)) {
+    const file = await getFile(storedFileId);
+    if (!file) return res.status(404).json({ success: false, message: 'Progress photo not found.' });
+
+    res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(file.length));
+    res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+
+    const stream = openDownloadStream(storedFileId);
+    stream.on('error', (error) => {
+      if (!res.headersSent) {
+        res.status(404).json({ success: false, message: 'Progress photo not found.' });
+      } else {
+        res.destroy(error);
+      }
+    });
+    return stream.pipe(res);
+  }
+
+  // Backward-compatible fallback for legacy local files.
+  const resolved = path.resolve(storedFileId);
+  const uploadsRoot = path.resolve(path.join(__dirname, '..', 'uploads'));
+  if (!resolved.startsWith(`${uploadsRoot}${path.sep}`)) {
+    return res.status(400).json({ success: false, message: 'Invalid progress photo path.' });
+  }
+  if (!fs.existsSync(resolved)) {
+    return res.status(404).json({ success: false, message: 'Progress photo not found.' });
+  }
+  return res.sendFile(resolved);
 }
 
 async function listProgress(req, res) {

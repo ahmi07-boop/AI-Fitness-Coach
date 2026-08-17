@@ -9,6 +9,7 @@ const AdminLog = require('../models/AdminLog');
 const AIUsageLog = require('../models/AIUsageLog');
 const PromptTemplate = require('../models/PromptTemplate');
 const PlanTemplate = require('../models/PlanTemplate');
+const { getFile, openDownloadStream, deleteFile, isStoredFileId } = require('../services/storageService');
 
 const REPORT_TIMEZONE = process.env.APP_TIMEZONE || 'UTC';
 
@@ -32,10 +33,29 @@ async function writeAdminLog(admin, event, targetUser = null, status = 'Success'
 async function getUserAvatar(req, res) {
   const user = await User.findById(req.params.id).select('profile.avatarPath');
   if (!user?.profile?.avatarPath) return res.status(404).end();
+
+  const avatarFileId = user.profile.avatarPath;
+  if (isStoredFileId(avatarFileId)) {
+    const file = await getFile(avatarFileId);
+    if (!file) return res.status(404).end();
+
+    res.setHeader('Content-Type', file.contentType || 'image/webp');
+    res.setHeader('Content-Length', String(file.length));
+    res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+
+    const stream = openDownloadStream(avatarFileId);
+    stream.on('error', (error) => {
+      if (!res.headersSent) res.status(404).end();
+      else res.destroy(error);
+    });
+    return stream.pipe(res);
+  }
+
+  // Backward-compatible fallback for legacy local avatars.
   const avatarDirectory = path.join(__dirname, '..', 'uploads', 'profiles');
-  const avatarPath = path.join(avatarDirectory, path.basename(user.profile.avatarPath));
+  const avatarPath = path.join(avatarDirectory, path.basename(avatarFileId));
   try { await fs.access(avatarPath); } catch { return res.status(404).end(); }
-  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
   return res.sendFile(path.resolve(avatarPath));
 }
 
@@ -375,18 +395,53 @@ async function updatePromptTemplate(req, res) {
 
 
 async function getImageFile(req, res) {
-  const image = await BodyAnalysis.findById(req.params.id).select('userId images').lean();
+  const allowedPositions = new Set(['front', 'back', 'left', 'right']);
+  const position = String(req.params.position || '').toLowerCase();
+  if (!allowedPositions.has(position)) {
+    return res.status(400).json({ success: false, message: 'Invalid image position.' });
+  }
+
+  const image = await BodyAnalysis.findById(req.params.id).select('userId images moderationStatus').lean();
   if (!image) return res.status(404).json({ success: false, message: 'Image analysis not found.' });
-  const relativePath = image.images?.[req.params.position];
-  if (!relativePath) return res.status(404).json({ success: false, message: 'Requested image is not available.' });
-  const resolved = path.resolve(relativePath);
+
+  const storedFileId = image.images?.[position];
+  if (!storedFileId) {
+    return res.status(404).json({ success: false, message: 'Requested image is not available.' });
+  }
+
+  if (isStoredFileId(storedFileId)) {
+    const file = await getFile(storedFileId);
+    if (!file) {
+      return res.status(404).json({ success: false, message: 'Image file not found.' });
+    }
+
+    res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
+    res.setHeader('Content-Length', String(file.length));
+    res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+
+    const stream = openDownloadStream(storedFileId);
+    stream.on('error', (error) => {
+      if (!res.headersSent) {
+        res.status(404).json({ success: false, message: 'Image file not found.' });
+      } else {
+        res.destroy(error);
+      }
+    });
+    return stream.pipe(res);
+  }
+
+  // Backward-compatible fallback for legacy local files.
+  const resolved = path.resolve(storedFileId);
   const uploadsRoot = path.resolve(path.join(__dirname, '..', 'uploads'));
-  if (!resolved.startsWith(`${uploadsRoot}${path.sep}`)) return res.status(400).json({ success: false, message: 'Invalid image path.' });
+  if (!resolved.startsWith(`${uploadsRoot}${path.sep}`)) {
+    return res.status(400).json({ success: false, message: 'Invalid image path.' });
+  }
   try {
-    return res.sendFile(resolved);
-  } catch (error) {
+    await fs.access(resolved);
+  } catch {
     return res.status(404).json({ success: false, message: 'Image file not found.' });
   }
+  return res.sendFile(resolved);
 }
 
 async function listImages(req, res) {
@@ -396,16 +451,45 @@ async function listImages(req, res) {
 
 async function updateImageModeration(req, res) {
   const { status, reason } = req.body;
-  if (!['Pending', 'Approved', 'Flagged', 'Deleted'].includes(status)) return res.status(400).json({ success: false, message: 'Invalid moderation status.' });
-  const image = await BodyAnalysis.findByIdAndUpdate(req.params.id, { moderationStatus: status, moderationReason: reason || '', moderatedAt: new Date() }, { new: true }).populate('userId', 'name email');
+  if (!['Pending', 'Approved', 'Flagged', 'Deleted'].includes(status)) {
+    return res.status(400).json({ success: false, message: 'Invalid moderation status.' });
+  }
+
+  const image = await BodyAnalysis.findByIdAndUpdate(
+    req.params.id,
+    { moderationStatus: status, moderationReason: reason || '', moderatedAt: new Date() },
+    { new: true }
+  ).populate('userId', 'name email');
+
   if (!image) return res.status(404).json({ success: false, message: 'Image analysis not found.' });
+
   if (status === 'Deleted') {
     for (const value of Object.values(image.images || {})) {
       if (!value) continue;
-      try { await fs.unlink(path.resolve(value)); } catch (_) { /* already removed */ }
+
+      if (isStoredFileId(value)) {
+        await deleteFile(value).catch((error) => {
+          console.warn('GridFS body-image cleanup failed:', error.message);
+        });
+      } else {
+        // Legacy local-file cleanup only; never accept arbitrary paths.
+        const resolved = path.resolve(value);
+        const uploadsRoot = path.resolve(path.join(__dirname, '..', 'uploads'));
+        if (resolved.startsWith(`${uploadsRoot}${path.sep}`)) {
+          await fs.unlink(resolved).catch(() => {});
+        }
+      }
     }
   }
-  await writeAdminLog(req.user._id, `Body image ${status.toLowerCase()}`, image.userId?._id || image.userId, 'Success', { analysisId: image._id, reason });
+
+  await writeAdminLog(
+    req.user._id,
+    `Body image ${status.toLowerCase()}`,
+    image.userId?._id || image.userId,
+    'Success',
+    { analysisId: image._id, reason }
+  );
+
   res.json({ success: true, message: `Image marked ${status}.`, data: { image } });
 }
 

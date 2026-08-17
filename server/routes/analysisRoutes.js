@@ -1,16 +1,11 @@
 const router = require('express').Router();
 const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
 const { verifyJWT } = require('../middleware/auth');
 const { bodyAnalysis, history, compare } = require('../controllers/analysisController');
 
-const uploadDirectory = path.join(__dirname, '..', 'uploads');
-fs.mkdirSync(uploadDirectory, { recursive: true });
-
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const upload = multer({
-  dest: uploadDirectory,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024, files: 4, fields: 8, parts: 12, fieldNameSize: 64 },
   fileFilter: (req, file, callback) => {
     if (!allowedMimeTypes.has(file.mimetype)) {
