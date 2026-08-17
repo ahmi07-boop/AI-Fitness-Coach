@@ -8,7 +8,7 @@ const { connectDB, disconnectDB } = require('../config/db');
 const User = require('../models/User');
 const Progress = require('../models/Progress');
 const BodyAnalysis = require('../models/BodyAnalysis');
-const { uploadBuffer, isStoredFileId } = require('../services/storageService');
+const { uploadBuffer, isStoredFileId, isAllowedLegacyPath } = require('../services/storageService');
 
 async function exists(filePath) {
   try { await fs.access(filePath); return true; } catch { return false; }
@@ -16,9 +16,8 @@ async function exists(filePath) {
 
 function safeLegacyPath(value) {
   if (!value) return null;
-  const uploadsRoot = path.resolve(path.join(__dirname, '..', 'uploads'));
   const resolved = path.resolve(String(value));
-  return resolved.startsWith(`${uploadsRoot}${path.sep}`) ? resolved : null;
+  return isAllowedLegacyPath(resolved) ? resolved : null;
 }
 
 async function migrateFile(value, purpose, ownerUserId, contentType = 'image/webp') {
@@ -45,6 +44,7 @@ async function main() {
 
   let migrated = 0;
   let missing = 0;
+  let cleared = 0;
 
   const users = await User.find({ 'profile.avatarPath': { $exists: true, $ne: null } }).select('_id profile.avatarPath');
   for (const user of users) {
@@ -57,7 +57,12 @@ async function main() {
       await user.save();
       migrated += 1;
     } else {
+      // The local file is permanently unavailable on the ephemeral runtime.
+      // Clear only the stale pointer so the account remains usable.
+      user.profile.avatarPath = null;
+      await user.save();
       missing += 1;
+      cleared += 1;
     }
   }
 
@@ -79,7 +84,11 @@ async function main() {
         changed = true;
         migrated += 1;
       } else {
+        entry.photos[type].path = undefined;
+        entry.photos[type].uploadedAt = undefined;
         missing += 1;
+        cleared += 1;
+        changed = true;
       }
     }
     if (changed) await entry.save();
@@ -92,7 +101,7 @@ async function main() {
       { 'images.left': { $exists: true, $ne: null } },
       { 'images.right': { $exists: true, $ne: null } },
     ],
-  }).select('userId images');
+  }).select('userId images imageMetadata');
 
   for (const analysis of analyses) {
     let changed = false;
@@ -105,13 +114,17 @@ async function main() {
         changed = true;
         migrated += 1;
       } else {
+        analysis.images[position] = undefined;
+        if (analysis.imageMetadata?.[position]) analysis.imageMetadata[position] = undefined;
         missing += 1;
+        cleared += 1;
+        changed = true;
       }
     }
     if (changed) await analysis.save();
   }
 
-  console.log(`File-storage migration complete. Migrated: ${migrated}. Missing legacy files: ${missing}.`);
+  console.log(`File-storage migration complete. Migrated: ${migrated}. Missing legacy files: ${missing}. Stale references cleared: ${cleared}.`);
 }
 
 main()

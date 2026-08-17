@@ -15,7 +15,7 @@ async function reserveFreeGeneration(userId) {
       { 'billing.subscriptionStatus': { $nin: ['active', 'trialing'] } },
     ] },
     { $inc: { 'planUsage.freeGenerationsUsed': 1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
   return updated;
 }
@@ -121,7 +121,7 @@ async function generatePlan(req, res) {
 
     const plan = await Plan.findOneAndUpdate(
       { user: req.user._id }, payload,
-      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+      { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
     );
 
     res.status(201).json({
@@ -172,7 +172,7 @@ async function createPlan(req, res) {
 
 async function updatePlan(req, res) {
   const payload = cleanPlanPayload(req.body);
-  const plan = await Plan.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true }).populate('user', 'name email');
+  const plan = await Plan.findByIdAndUpdate(req.params.id, payload, { returnDocument: 'after', runValidators: true }).populate('user', 'name email');
   if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
   res.json({ success: true, message: 'Plan updated.', data: { plan } });
 }

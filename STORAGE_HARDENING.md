@@ -31,7 +31,9 @@ npm run migrate:file-storage
 
 The migration uploads legacy files into GridFS and replaces the stored path with the new GridFS ID. It does not invent or recreate files that no longer exist.
 
-If an old MongoDB record points to a file that is already gone, that particular image must be uploaded again. The application cannot recover a file that no longer exists.
+If an old MongoDB record points to a file that is already gone, the migration clears only that stale file reference while preserving the progress/body-analysis/user record. The application cannot recover a file that no longer exists.
+
+The download endpoints also self-heal stale legacy references: when a legacy file is missing, the reference is cleared atomically and the endpoint returns a controlled 404 instead of allowing an `ENOENT`/`sendFile` error to reach Railway logs. New GridFS references are never cleared merely because a legacy filesystem path is unavailable.
 
 ## Railway variables
 
@@ -44,3 +46,11 @@ MONGO_FILE_BUCKET=fitcoach_files
 No separate object-storage account is required for this implementation because GridFS uses the existing MongoDB connection.
 
 Keep `MONGODB_URI`, `JWT_SECRET`, Stripe keys, OpenAI keys and other secrets in Railway Variables only.
+
+## Runtime hardening
+
+- Legacy paths are accepted only under known upload roots.
+- Legacy `sendFile` responses use explicit callbacks so filesystem races cannot produce unhandled errors.
+- Missing legacy progress photos, moderation images and avatars are cleaned from their specific pointer fields without deleting the parent record.
+- Mongoose 9 `returnDocument: 'after'` is used instead of the deprecated `new: true` option.
+- Existing application data and MongoDB remain the source of truth; no user records are deleted by the cleanup.

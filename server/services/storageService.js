@@ -3,6 +3,31 @@ const path = require('path');
 const mongoose = require('mongoose');
 
 const BUCKET_NAME = process.env.MONGO_FILE_BUCKET || 'fitcoach_files';
+const LEGACY_UPLOAD_ROOTS = [
+  path.resolve(path.join(__dirname, '..', 'uploads')),
+  path.resolve('/app/uploads'),
+];
+
+function isAllowedLegacyPath(filePath) {
+  const resolved = path.resolve(String(filePath || ''));
+  return LEGACY_UPLOAD_ROOTS.some((root) => (
+    resolved.startsWith(`${root}${path.sep}`)
+  ));
+}
+
+async function legacyFileExists(filePath) {
+  if (!isAllowedLegacyPath(filePath)) return false;
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function legacyUploadRoots() {
+  return [...LEGACY_UPLOAD_ROOTS];
+}
 
 function getBucket() {
   const db = mongoose.connection.db;
@@ -107,4 +132,7 @@ module.exports = {
   openDownloadStream,
   deleteFile,
   isStoredFileId,
+  isAllowedLegacyPath,
+  legacyFileExists,
+  legacyUploadRoots,
 };

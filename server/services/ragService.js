@@ -80,7 +80,7 @@ async function upsertDocument(userId, sourceType, sourceId, content, metadata = 
   return RagDocument.findOneAndUpdate(
     { user: userId, sourceType, sourceId },
     { $set: { content, contentHash, embedding, metadata } },
-    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
   );
 }
 

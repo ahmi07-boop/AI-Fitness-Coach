@@ -5,8 +5,7 @@ const AIUsageLog = require('../models/AIUsageLog');
 const { normalizeDay, dayKey, getCurrentWeekRange } = require('../utils/date');
 const sharp = require('sharp');
 const path = require('path');
-const fs = require('fs');
-const { uploadBuffer, getFile, openDownloadStream, deleteFile, isStoredFileId } = require('../services/storageService');
+const { uploadBuffer, getFile, openDownloadStream, deleteFile, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
 
 const aiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const INSIGHT_MODEL = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -141,7 +140,7 @@ async function uploadProgressPhoto(req, res) {
         $setOnInsert: { user: req.user._id, date },
         $set: { [`photos.${type}`]: { path: stored.fileId, uploadedAt: new Date() } },
       },
-      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+      { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
     );
 
     if (previousFileId && isStoredFileId(previousFileId) && previousFileId !== stored.fileId) {
@@ -194,16 +193,35 @@ async function getProgressPhoto(req, res) {
     return stream.pipe(res);
   }
 
-  // Backward-compatible fallback for legacy local files.
+  // Backward-compatible fallback for legacy local files. Legacy files are
+  // read-only compatibility data; new uploads always use GridFS.
   const resolved = path.resolve(storedFileId);
-  const uploadsRoot = path.resolve(path.join(__dirname, '..', 'uploads'));
-  if (!resolved.startsWith(`${uploadsRoot}${path.sep}`)) {
-    return res.status(400).json({ success: false, message: 'Invalid progress photo path.' });
+  if (!isAllowedLegacyPath(resolved)) {
+    return res.status(404).json({ success: false, message: 'Progress photo is no longer available.' });
   }
-  if (!fs.existsSync(resolved)) {
-    return res.status(404).json({ success: false, message: 'Progress photo not found.' });
+
+  if (!(await legacyFileExists(resolved))) {
+    // Railway filesystems are ephemeral. Once a legacy local file is gone,
+    // clear only the stale pointer so the same missing file is never retried
+    // on every page load. The progress record itself is preserved.
+    await Progress.updateOne(
+      { _id: entry._id, [`photos.${type}.path`]: storedFileId },
+      { $unset: { [`photos.${type}.path`]: 1, [`photos.${type}.uploadedAt`]: 1 } }
+    ).catch((error) => {
+      console.warn('Unable to clear stale legacy progress photo reference:', error.message);
+    });
+    return res.status(404).json({ success: false, message: 'Progress photo is no longer available. Please re-upload it.' });
   }
-  return res.sendFile(resolved);
+
+  return new Promise((resolve) => {
+    res.sendFile(resolved, (error) => {
+      if (!error) return resolve();
+      if (!res.headersSent) {
+        res.status(404).json({ success: false, message: 'Progress photo is no longer available.' });
+      }
+      resolve();
+    });
+  });
 }
 
 async function listProgress(req, res) {
@@ -291,7 +309,7 @@ async function saveTodayProgress(req, res) {
   const entry = await Progress.findOneAndUpdate(
     { user: req.user._id, date },
     { $set: update },
-    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
   );
 
   const recentEntries = await Progress.find({ user: req.user._id })
@@ -369,7 +387,7 @@ async function saveTodayNutrition(req, res) {
         completedDay: summary.completedDay,
       },
     },
-    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
   );
 
   const recentEntries = await Progress.find({ user: req.user._id }).sort({ date: -1, createdAt: -1 }).limit(365);
@@ -472,7 +490,7 @@ async function saveWorkoutCompletion(req, res) {
         completedDay: summary.completedDay,
       },
     },
-    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
   );
 
   const recentEntries = await Progress.find({ user: req.user._id }).sort({ date: -1, createdAt: -1 }).limit(365);
@@ -534,7 +552,7 @@ async function createProgress(req, res) {
   const entry = await Progress.findOneAndUpdate(
     { user: req.user._id, date: normalizedDate },
     { $set: payload },
-    { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true }
   );
 
   res.status(201).json({ success: true, message: 'Progress saved.', data: { progress: entry } });

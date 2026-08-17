@@ -9,7 +9,7 @@ const AdminLog = require('../models/AdminLog');
 const AIUsageLog = require('../models/AIUsageLog');
 const PromptTemplate = require('../models/PromptTemplate');
 const PlanTemplate = require('../models/PlanTemplate');
-const { getFile, openDownloadStream, deleteFile, isStoredFileId } = require('../services/storageService');
+const { getFile, openDownloadStream, deleteFile, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
 
 const REPORT_TIMEZONE = process.env.APP_TIMEZONE || 'UTC';
 
@@ -54,9 +54,23 @@ async function getUserAvatar(req, res) {
   // Backward-compatible fallback for legacy local avatars.
   const avatarDirectory = path.join(__dirname, '..', 'uploads', 'profiles');
   const avatarPath = path.join(avatarDirectory, path.basename(avatarFileId));
-  try { await fs.access(avatarPath); } catch { return res.status(404).end(); }
+  if (!isAllowedLegacyPath(avatarPath) || !(await legacyFileExists(avatarPath))) {
+    await User.updateOne(
+      { _id: user._id, 'profile.avatarPath': avatarFileId },
+      { $set: { 'profile.avatarPath': null } }
+    ).catch((error) => {
+      console.warn('Unable to clear stale legacy admin avatar reference:', error.message);
+    });
+    return res.status(404).end();
+  }
   res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
-  return res.sendFile(path.resolve(avatarPath));
+  return new Promise((resolve) => {
+    res.sendFile(path.resolve(avatarPath), (error) => {
+      if (!error) return resolve();
+      if (!res.headersSent) res.status(404).end();
+      resolve();
+    });
+  });
 }
 
 async function assignPlanTemplate(req, res) {
@@ -300,7 +314,7 @@ async function createPlanTemplate(req, res) {
 async function updatePlanTemplate(req, res) {
   const payload = Object.fromEntries(Object.entries(req.body).filter(([key]) => ['name','goal','calories','protein','carbs','fat','hydrationLiters','meals','workout','notes','active'].includes(key)));
   payload.updatedBy = req.user._id;
-  const template = await PlanTemplate.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true });
+  const template = await PlanTemplate.findByIdAndUpdate(req.params.id, payload, { returnDocument: 'after', runValidators: true });
   if (!template) return res.status(404).json({ success: false, message: 'Plan template not found.' });
   await writeAdminLog(req.user._id, 'Plan template updated', null, 'Success', { templateId: template._id });
   res.json({ success: true, data: { template } });
@@ -323,7 +337,7 @@ async function updatePlan(req, res) {
   const payload = Object.fromEntries(Object.entries(req.body).filter(([key]) => allowed.includes(key)));
   payload.status = payload.status || 'Admin Modified';
   payload.lastModifiedBy = req.user._id;
-  const plan = await Plan.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true }).populate('user', 'name email');
+  const plan = await Plan.findByIdAndUpdate(req.params.id, payload, { returnDocument: 'after', runValidators: true }).populate('user', 'name email');
   if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
   await writeAdminLog(req.user._id, 'Plan updated', plan.user?._id || plan.user, 'Success', { planId: plan._id });
   res.json({ success: true, message: 'Plan updated.', data: { plan } });
@@ -349,7 +363,7 @@ async function updateAIOutputStatus(req, res) {
     const chat = await ChatLog.findByIdAndUpdate(
       req.params.id,
       { moderationStatus, aiModerationStatus: status },
-      { new: true, runValidators: true }
+      { returnDocument: 'after', runValidators: true }
     );
     if (!chat) return res.status(404).json({ success: false, message: 'Chat output not found.' });
     await writeAdminLog(req.user._id, 'AI chatbot output moderated', chat.user, 'Success', { status });
@@ -363,7 +377,7 @@ async function updateAIOutputStatus(req, res) {
       moderatedAt: new Date(),
       moderatedBy: req.user._id,
     },
-    { new: true, runValidators: true }
+    { returnDocument: 'after', runValidators: true }
   );
   if (!plan) return res.status(404).json({ success: false, message: 'AI plan output not found.' });
   await writeAdminLog(req.user._id, 'AI plan output moderated', plan.user, 'Success', { status });
@@ -388,7 +402,7 @@ async function updatePromptTemplate(req, res) {
   if (req.body.template !== undefined) payload.template = req.body.template;
   if (req.body.active !== undefined) payload.active = Boolean(req.body.active);
   payload.updatedBy = req.user._id;
-  const template = await PromptTemplate.findOneAndUpdate({ key: req.params.key }, payload, { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true });
+  const template = await PromptTemplate.findOneAndUpdate({ key: req.params.key }, payload, { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true, runValidators: true });
   await writeAdminLog(req.user._id, 'Prompt template updated', null, 'Success', { key: req.params.key });
   res.json({ success: true, data: { template } });
 }
@@ -430,18 +444,33 @@ async function getImageFile(req, res) {
     return stream.pipe(res);
   }
 
-  // Backward-compatible fallback for legacy local files.
+  // Backward-compatible fallback for legacy local files. New uploads never
+  // depend on the Railway filesystem.
   const resolved = path.resolve(storedFileId);
-  const uploadsRoot = path.resolve(path.join(__dirname, '..', 'uploads'));
-  if (!resolved.startsWith(`${uploadsRoot}${path.sep}`)) {
-    return res.status(400).json({ success: false, message: 'Invalid image path.' });
+  if (!isAllowedLegacyPath(resolved)) {
+    return res.status(404).json({ success: false, message: 'Image file is no longer available.' });
   }
-  try {
-    await fs.access(resolved);
-  } catch {
-    return res.status(404).json({ success: false, message: 'Image file not found.' });
+
+  if (!(await legacyFileExists(resolved))) {
+    // Preserve the moderation record but clear only the stale file pointer.
+    await BodyAnalysis.updateOne(
+      { _id: image._id, [`images.${position}`]: storedFileId },
+      { $unset: { [`images.${position}`]: 1, [`imageMetadata.${position}`]: 1 } }
+    ).catch((error) => {
+      console.warn('Unable to clear stale legacy moderation image reference:', error.message);
+    });
+    return res.status(404).json({ success: false, message: 'Image file is no longer available. Please re-upload the body analysis.' });
   }
-  return res.sendFile(resolved);
+
+  return new Promise((resolve) => {
+    res.sendFile(resolved, (error) => {
+      if (!error) return resolve();
+      if (!res.headersSent) {
+        res.status(404).json({ success: false, message: 'Image file is no longer available.' });
+      }
+      resolve();
+    });
+  });
 }
 
 async function listImages(req, res) {
@@ -458,7 +487,7 @@ async function updateImageModeration(req, res) {
   const image = await BodyAnalysis.findByIdAndUpdate(
     req.params.id,
     { moderationStatus: status, moderationReason: reason || '', moderatedAt: new Date() },
-    { new: true }
+    { returnDocument: 'after' }
   ).populate('userId', 'name email');
 
   if (!image) return res.status(404).json({ success: false, message: 'Image analysis not found.' });

@@ -15,7 +15,7 @@ async function main() {
   const user = await User.findOneAndUpdate(
     { email },
     { $set: { role: 'admin' } },
-    { new: true, runValidators: true }
+    { returnDocument: 'after', runValidators: true }
   ).select('-passwordHash');
 
   if (!user) {

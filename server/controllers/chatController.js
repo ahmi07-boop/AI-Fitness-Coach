@@ -176,7 +176,7 @@ async function updateModeration(req, res) {
   const conversation = await ChatLog.findByIdAndUpdate(
     req.params.id,
     { moderationStatus },
-    { new: true, runValidators: true }
+    { returnDocument: 'after', runValidators: true }
   ).populate('user', 'name email');
 
   if (!conversation) return res.status(404).json({ success: false, message: 'Conversation not found.' });

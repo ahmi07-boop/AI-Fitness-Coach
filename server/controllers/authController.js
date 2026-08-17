@@ -2,10 +2,9 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const AdminLog = require('../models/AdminLog');
-const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
-const { uploadBuffer, getFile, openDownloadStream, deleteFile, isStoredFileId } = require('../services/storageService');
+const { uploadBuffer, getFile, openDownloadStream, deleteFile, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
 const AUTH_COOKIE = 'fitcoach_session';
 
 function setAuthCookie(res, token) {
@@ -160,15 +159,30 @@ async function getAvatar(req, res) {
     return stream.pipe(res);
   }
 
-  // Backward-compatible fallback for legacy local files. New uploads never use
-  // the Railway filesystem.
+  // Backward-compatible fallback for legacy local avatars. New uploads never
+  // use the Railway filesystem.
   const avatarDirectory = path.join(__dirname, '..', 'uploads', 'profiles');
   const avatarPath = avatarFileId ? path.join(avatarDirectory, path.basename(avatarFileId)) : null;
-  if (!avatarPath || !fs.existsSync(avatarPath)) {
-    return res.status(404).json({ success: false, message: 'Profile picture not found.' });
+  if (!avatarPath || !isAllowedLegacyPath(avatarPath) || !(await legacyFileExists(avatarPath))) {
+    // Clear only the stale pointer; the user account remains intact.
+    if (avatarFileId && req.user.profile?.avatarPath === avatarFileId) {
+      req.user.profile.avatarPath = null;
+      await req.user.save().catch((error) => {
+        console.warn('Unable to clear stale legacy avatar reference:', error.message);
+      });
+    }
+    return res.status(404).json({ success: false, message: 'Profile picture is no longer available. Please upload a new picture.' });
   }
   res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
-  return res.sendFile(path.resolve(avatarPath));
+  return new Promise((resolve) => {
+    res.sendFile(path.resolve(avatarPath), (error) => {
+      if (!error) return resolve();
+      if (!res.headersSent) {
+        res.status(404).json({ success: false, message: 'Profile picture is no longer available.' });
+      }
+      resolve();
+    });
+  });
 }
 
 async function updateProfile(req, res) {
