@@ -58,7 +58,7 @@ function AdminModeration() {
             : null;
           if (!position || !item.id) return { id: item.id, position, url: null };
           try {
-            const response = await getModerationImageFile(item.id, position);
+            const response = await getModerationImageFile(item.id, position, item.image?.images?.[position]);
             const url = URL.createObjectURL(response.data);
             previewUrlsRef.current.set(item.id, url);
             return { id: item.id, position, url };

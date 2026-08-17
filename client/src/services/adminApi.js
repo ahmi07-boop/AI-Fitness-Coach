@@ -17,7 +17,13 @@ export const getAdminLogs = () => api.get('/api/admin/logs');
 export const getAIUsageLogs = () => api.get('/api/admin/logs/ai-usage');
 export const getErrorLogs = () => api.get('/api/admin/logs/errors');
 
-export const getModerationImageFile = (id, position) => api.get(`/api/admin/moderation/images/${id}/file/${position}`, { responseType: 'blob' });
+export const getModerationImageFile = (id, position, fileId = '') => {
+  const storedFileId = String(fileId || '').trim();
+  if (/^[a-f0-9]{24}$/i.test(storedFileId)) {
+    return api.get(`/api/admin/moderation/files/${encodeURIComponent(storedFileId)}`, { responseType: 'blob' });
+  }
+  return api.get(`/api/admin/moderation/images/${encodeURIComponent(String(id))}/file/${encodeURIComponent(String(position))}`, { responseType: 'blob' });
+};
 
 export const getPlanTemplates = () => api.get('/api/admin/plans/templates');
 export const createPlanTemplate = (payload) => api.post('/api/admin/plans/templates', payload);

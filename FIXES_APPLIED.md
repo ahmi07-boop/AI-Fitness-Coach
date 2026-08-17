@@ -42,6 +42,8 @@
 - Admin sidebars now display the authenticated admin identity.
 - Workout overview now displays the actual plan workout title.
 
+- Admin moderation image previews now use a validated, body-analysis-referenced GridFS file endpoint, while retaining the legacy image-position endpoint for old local-file records.
+
 ## Tests
 
 The enterprise contract suite now covers:

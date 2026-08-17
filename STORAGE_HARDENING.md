@@ -54,3 +54,13 @@ Keep `MONGODB_URI`, `JWT_SECRET`, Stripe keys, OpenAI keys and other secrets in 
 - Missing legacy progress photos, moderation images and avatars are cleaned from their specific pointer fields without deleting the parent record.
 - Mongoose 9 `returnDocument: 'after'` is used instead of the deprecated `new: true` option.
 - Existing application data and MongoDB remain the source of truth; no user records are deleted by the cleanup.
+
+## Admin moderation preview retrieval
+
+The admin moderation preview now prefers the dedicated authenticated GridFS endpoint:
+
+`GET /api/admin/moderation/files/:fileId`
+
+The endpoint accepts only a valid GridFS ObjectId that is actually referenced by a body-analysis moderation record. This avoids coupling preview retrieval to the parent `BodyAnalysis` document `_id` and prevents malformed/legacy analysis IDs from turning a valid stored image into a failed preview request.
+
+The original `/api/admin/moderation/images/:id/file/:position` endpoint remains available for backwards-compatible legacy filesystem references.

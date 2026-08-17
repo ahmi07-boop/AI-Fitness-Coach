@@ -17,6 +17,7 @@ const {
   updatePromptTemplate,
   listImages,
   getImageFile,
+  getModerationFile,
   updateImageModeration,
   listChatModeration,
   moderateChat,
@@ -42,6 +43,7 @@ router.patch('/ai/outputs/:id', updateAIOutputStatus);
 router.get('/ai/prompts', listPromptTemplates);
 router.patch('/ai/prompts/:key', updatePromptTemplate);
 router.get('/moderation/images', listImages);
+router.get('/moderation/files/:fileId', getModerationFile);
 router.get('/moderation/images/:id/file/:position', getImageFile);
 router.patch('/moderation/images/:id', updateImageModeration);
 router.get('/moderation/chats', listChatModeration);

@@ -34,6 +34,8 @@ The `example.com` matches are configuration/documentation/test examples, not run
 ## Runtime persistence
 Client runtime source contains no `localStorage` or `sessionStorage` references after remediation. Authentication is persisted by the server as an HttpOnly cookie, allowing page refreshes without exposing the JWT to JavaScript.
 
+- Admin moderation image previews now retrieve GridFS files directly from validated file references, reducing failures caused by parent analysis-ID/path mismatches.
+
 ## Verification
 - Server JavaScript syntax check: PASS for all server `.js` files.
 - Static source audit: PASS for no runtime localStorage/sessionStorage/mock/dummy data.

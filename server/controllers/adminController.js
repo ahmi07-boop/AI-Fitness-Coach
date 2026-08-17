@@ -408,6 +408,106 @@ async function updatePromptTemplate(req, res) {
 }
 
 
+async function streamStoredAdminFile(fileId, req, res) {
+  if (!isStoredFileId(fileId)) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_FILE_ID',
+      message: 'Invalid stored file identifier.',
+    });
+  }
+
+  const file = await getFile(fileId);
+  if (!file) {
+    return res.status(404).json({
+      success: false,
+      code: 'FILE_NOT_FOUND',
+      message: 'Image file not found.',
+    });
+  }
+
+  const contentType = String(file.contentType || file.metadata?.contentType || 'application/octet-stream');
+  const length = Number(file.length);
+
+  res.setHeader('Content-Type', contentType);
+  if (Number.isFinite(length) && length >= 0) {
+    res.setHeader('Content-Length', String(length));
+  }
+  res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+  res.setHeader('Content-Disposition', `inline; filename="${String(file.filename || 'image').replace(/["\\\r\n]/g, '_')}"`);
+
+  const stream = openDownloadStream(fileId);
+  if (!stream) {
+    return res.status(404).json({
+      success: false,
+      code: 'FILE_NOT_FOUND',
+      message: 'Image file not found.',
+    });
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+
+    stream.once('error', (error) => {
+      console.warn(`Admin image stream failed [${req.requestId || 'no-request-id'}]:`, error.message);
+      if (!res.headersSent) {
+        res.status(404).json({
+          success: false,
+          code: 'FILE_NOT_FOUND',
+          message: 'Image file is no longer available.',
+        });
+      } else {
+        res.destroy(error);
+      }
+      finish();
+    });
+
+    stream.once('end', finish);
+    stream.pipe(res);
+  });
+}
+
+async function getModerationFile(req, res) {
+  const fileId = String(req.params.fileId || '').trim();
+
+  // Do not expose arbitrary GridFS files to an admin endpoint. Confirm that
+  // this file is referenced by at least one body-analysis moderation record.
+  if (!isStoredFileId(fileId)) {
+    return res.status(400).json({
+      success: false,
+      code: 'INVALID_FILE_ID',
+      message: 'Invalid stored file identifier.',
+      requestId: req.requestId,
+    });
+  }
+
+  const referenced = await BodyAnalysis.exists({
+    $or: [
+      { 'images.front': fileId },
+      { 'images.back': fileId },
+      { 'images.left': fileId },
+      { 'images.right': fileId },
+    ],
+  });
+
+  if (!referenced) {
+    return res.status(404).json({
+      success: false,
+      code: 'FILE_NOT_REFERENCED',
+      message: 'Image file is not associated with a body-analysis record.',
+      requestId: req.requestId,
+    });
+  }
+
+  return streamStoredAdminFile(fileId, req, res);
+}
+
 async function getImageFile(req, res) {
   const allowedPositions = new Set(['front', 'back', 'left', 'right']);
   const position = String(req.params.position || '').toLowerCase();
@@ -424,24 +524,7 @@ async function getImageFile(req, res) {
   }
 
   if (isStoredFileId(storedFileId)) {
-    const file = await getFile(storedFileId);
-    if (!file) {
-      return res.status(404).json({ success: false, message: 'Image file not found.' });
-    }
-
-    res.setHeader('Content-Type', file.contentType || 'application/octet-stream');
-    res.setHeader('Content-Length', String(file.length));
-    res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
-
-    const stream = openDownloadStream(storedFileId);
-    stream.on('error', (error) => {
-      if (!res.headersSent) {
-        res.status(404).json({ success: false, message: 'Image file not found.' });
-      } else {
-        res.destroy(error);
-      }
-    });
-    return stream.pipe(res);
+    return streamStoredAdminFile(storedFileId, req, res);
   }
 
   // Backward-compatible fallback for legacy local files. New uploads never
@@ -572,6 +655,6 @@ async function listErrors(req, res) {
 module.exports = {
   listUsers, getUserAvatar, updateUser, dashboardSummary, listPlanTemplates, createPlanTemplate, updatePlanTemplate, assignPlanTemplate, listPlans, updatePlan,
   listAIOutputs, updateAIOutputStatus, listPromptTemplates, updatePromptTemplate,
-  listImages, getImageFile, updateImageModeration, listChatModeration, moderateChat,
+  listImages, getImageFile, getModerationFile, updateImageModeration, listChatModeration, moderateChat,
   listLogs, listAIUsage, listErrors, writeAdminLog,
 };
