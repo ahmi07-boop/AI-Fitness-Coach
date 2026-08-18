@@ -49,12 +49,15 @@ function AdminModeration() {
           position: ["center", "top", "bottom"][index % 3],
           image: item,
           previewUrl: null,
+          imageAvailability: item.imageAvailability || {},
         }));
         setImages(normalizedImages);
 
         const previewResults = await Promise.allSettled(normalizedImages.map(async (item) => {
           const position = item.image?.images
-            ? Object.keys(item.image.images).find((key) => item.image.images[key])
+            ? Object.keys(item.image.images).find(
+                (key) => item.image.images[key] && item.imageAvailability?.[key] !== false
+              )
             : null;
           if (!position || !item.id) return { id: item.id, position, url: null };
           try {

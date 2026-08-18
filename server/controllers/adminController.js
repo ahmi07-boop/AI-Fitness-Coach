@@ -9,7 +9,7 @@ const AdminLog = require('../models/AdminLog');
 const AIUsageLog = require('../models/AIUsageLog');
 const PromptTemplate = require('../models/PromptTemplate');
 const PlanTemplate = require('../models/PlanTemplate');
-const { getFile, openDownloadStream, deleteFile, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
+const { getFile, getFiles, openDownloadStream, deleteFile, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
 
 const REPORT_TIMEZONE = process.env.APP_TIMEZONE || 'UTC';
 
@@ -557,8 +557,46 @@ async function getImageFile(req, res) {
 }
 
 async function listImages(req, res) {
-  const images = await BodyAnalysis.find().populate('userId', 'name email').sort({ createdAt: -1 }).limit(200);
-  res.json({ success: true, count: images.length, data: { images } });
+  const images = await BodyAnalysis.find()
+    .populate('userId', 'name email')
+    .sort({ createdAt: -1 })
+    .limit(200)
+    .lean();
+
+  const storedIds = images.flatMap((image) =>
+    Object.values(image.images || {}).filter((value) => isStoredFileId(value))
+  );
+  const storedFiles = await getFiles(storedIds);
+
+  const enrichedImages = await Promise.all(images.map(async (image) => {
+    const imageAvailability = {};
+
+    for (const [position, value] of Object.entries(image.images || {})) {
+      if (!value) {
+        imageAvailability[position] = false;
+        continue;
+      }
+
+      if (isStoredFileId(value)) {
+        imageAvailability[position] = storedFiles.has(String(value));
+      } else {
+        const resolved = path.resolve(String(value));
+        imageAvailability[position] =
+          isAllowedLegacyPath(resolved) && await legacyFileExists(resolved);
+      }
+    }
+
+    return {
+      ...image,
+      imageAvailability,
+    };
+  }));
+
+  res.json({
+    success: true,
+    count: enrichedImages.length,
+    data: { images: enrichedImages },
+  });
 }
 
 async function updateImageModeration(req, res) {

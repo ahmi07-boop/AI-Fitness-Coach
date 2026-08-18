@@ -98,6 +98,20 @@ async function getFile(fileId) {
   return files[0] || null;
 }
 
+async function getFiles(fileIds = []) {
+  const objectIds = [...new Set(
+    (Array.isArray(fileIds) ? fileIds : [])
+      .map(toObjectId)
+      .filter(Boolean)
+      .map((value) => String(value))
+  )].map((value) => new mongoose.Types.ObjectId(value));
+
+  if (!objectIds.length) return new Map();
+
+  const files = await getBucket().find({ _id: { $in: objectIds } }).toArray();
+  return new Map(files.map((file) => [String(file._id), file]));
+}
+
 function openDownloadStream(fileId) {
   const objectId = toObjectId(fileId);
   if (!objectId) return null;
@@ -129,6 +143,7 @@ module.exports = {
   uploadBuffer,
   uploadFile,
   getFile,
+  getFiles,
   openDownloadStream,
   deleteFile,
   isStoredFileId,

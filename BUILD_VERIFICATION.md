@@ -44,3 +44,12 @@ npm run lint
 npm run build
 npm run dev
 ```
+
+## 2026-08-18 local lint remediation
+
+The reported ESLint issues in `client/src/pages/Onboarding.jsx` were corrected:
+
+- `savedDraftId` is now declared from `await persistDraft(images)` before it is passed to `/analysis`.
+- The effect cleanup captures `previewUrlsRef.current` into a local variable before cleanup, satisfying `react-hooks/exhaustive-deps`.
+
+The source was reviewed after the changes. Full local `npm run lint` execution could not be reproduced in the packaging sandbox because the project's npm dependencies are not installed there and dependency installation was unavailable in that environment. The user's local environment remains the authoritative verification target.

@@ -5,6 +5,7 @@ import AIBadge from "../components/AIBadge";
 import AIAvatar from "../components/AIAvatar";
 import JourneyProgress from "../components/JourneyProgress";
 import { analyzeBody } from "../services/analysisApi";
+import { loadAnalysisDraft } from "../services/imageDraftStore";
 import {
   Activity,
   Brain,
@@ -276,6 +277,20 @@ function getAnalysisImages(locationState) {
   return source;
 }
 
+function createImagePreviews(imageMap) {
+  return Object.fromEntries(
+    Object.entries(imageMap || {}).map(([position, image]) => [
+      position,
+      image?.file
+        ? {
+            ...image,
+            url: image.url || URL.createObjectURL(image.file),
+          }
+        : image,
+    ])
+  );
+}
+
 function buildAnalysisFormData(images, profile, viewResults) {
   const formData = new FormData();
 
@@ -357,7 +372,46 @@ function Analysis() {
   const [images, setImages] = useState(
     getAnalysisImages(location.state)
   );
+  const [imagesHydrated, setImagesHydrated] = useState(Boolean(getAnalysisImages(location.state)));
   const { user, loading: authLoading } = useAuth();
+  const ownerKey = String(user?._id || user?.id || user?.email || "");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateImages() {
+      if (!ownerKey) return;
+
+      if (getAnalysisImages(location.state)) {
+        setImages(createImagePreviews(getAnalysisImages(location.state)));
+        setImagesHydrated(true);
+        return;
+      }
+
+      try {
+        const draftId = location.state?.analysisData?.draftId || "";
+        const draft = await loadAnalysisDraft(draftId, ownerKey);
+        if (cancelled) return;
+
+        if (!draft?.images) {
+          setImages(null);
+        } else {
+          setImages(createImagePreviews(draft.images));
+        }
+      } catch (error) {
+        console.error("Unable to restore the body-image draft:", error);
+        if (!cancelled) setImages(null);
+      } finally {
+        if (!cancelled) setImagesHydrated(true);
+      }
+    }
+
+    hydrateImages();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [location.state, ownerKey]);
 
   const { heightCm, weightKg } = useMemo(
     () => getProfileMeasurements(user),
@@ -385,7 +439,7 @@ function Analysis() {
       }
 
       if (!images) {
-        throw new Error("Your uploaded images are no longer available. Please return to onboarding and upload them again.");
+        throw new Error("Your uploaded images could not be restored. Please return to onboarding and upload them again.");
       }
 
       const entries = Object.entries(images).filter(([, image]) => image?.file);
@@ -431,12 +485,17 @@ function Analysis() {
           }
 
           previewImages[position] = {
-            url: objectUrl,
+            // Keep the original file-backed URL alive for the results screen.
+            url: image.url || URL.createObjectURL(image.file),
             detected: Boolean(landmarks),
           };
         } catch (error) {
-          URL.revokeObjectURL(objectUrl);
           console.warn(`MediaPipe failed for ${position} image`, error);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+          imageElement.onload = null;
+          imageElement.onerror = null;
+          imageElement.src = "";
         }
       }
 
@@ -528,21 +587,21 @@ function Analysis() {
   };
 
   useEffect(() => {
-    if (authLoading) return;
+    if (authLoading || !imagesHydrated) return;
 
-    // The route is normally entered from onboarding with File objects in
-    // navigation state. Do not start until auth/profile hydration has finished;
-    // otherwise the first request can race with authentication/profile hydration and send
-    // empty height/weight values to the API.
+    // Wait for both authentication/profile hydration and durable image-draft
+    // hydration. This prevents a refresh or browser history transition from
+    // racing analysis before IndexedDB has restored the four File objects.
     startAnalysis();
 
     return () => {
-      // Object URLs are intentionally kept while this page is mounted
-      // so the analyzed images remain visible on the results screen.
+      Object.values(images || {}).forEach((image) => {
+        if (image?.url) URL.revokeObjectURL(image.url);
+      });
     };
     // startAnalysis is intentionally a stable one-shot workflow.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading]);
+  }, [authLoading, imagesHydrated]);
 
   const result = analysis || {
     bmi,

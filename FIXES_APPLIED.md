@@ -55,3 +55,9 @@ The enterprise contract suite now covers:
 5. Profile name/email persistence.
 6. AI plan moderation persistence.
 7. Nutrition totals are authoritative from the saved plan.
+
+## 2026-08-18 lint remediation
+
+- Fixed `client/src/pages/Onboarding.jsx` `no-undef` failure by capturing the return value of `persistDraft(images)` as `savedDraftId` before navigating to `/analysis`.
+- Fixed `react-hooks/exhaustive-deps` cleanup warning by capturing `previewUrlsRef.current` in a local `previewUrls` variable inside the effect cleanup before iterating/revoking URLs.
+- Preserved the existing IndexedDB draft persistence, owner scoping, serialized save queue, MediaPipe configuration, and navigation contract.

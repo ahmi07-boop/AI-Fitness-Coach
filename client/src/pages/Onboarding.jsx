@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import {
+  deleteAnalysisDraft,
+  loadAnalysisDraft,
+  saveAnalysisDraft,
+} from "../services/imageDraftStore";
 import JourneyProgress from "../components/JourneyProgress";
 import {
   User,
@@ -18,7 +23,8 @@ import {
 
 function Onboarding() {
   const navigate = useNavigate();
-  const { updateProfile } = useAuth();
+  const { updateProfile, user } = useAuth();
+  const ownerKey = String(user?._id || user?.id || user?.email || "");
 
   const [step, setStep] = useState(1);
 
@@ -39,6 +45,64 @@ function Onboarding() {
     left: null,
     right: null,
   });
+  const draftIdRef = useRef("");
+  const draftSaveQueueRef = useRef(Promise.resolve());
+  const previewUrlsRef = useRef(new Map());
+
+  const persistDraft = (nextImages) => {
+    draftSaveQueueRef.current = draftSaveQueueRef.current
+      .then(() => saveAnalysisDraft(nextImages, draftIdRef.current, ownerKey))
+      .then((nextDraftId) => {
+        draftIdRef.current = nextDraftId;
+      });
+    return draftSaveQueueRef.current;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const previewUrls = previewUrlsRef.current;
+
+    async function restoreDraft() {
+      if (!ownerKey) return;
+      try {
+        const draft = await loadAnalysisDraft("", ownerKey);
+        if (cancelled || !draft) return;
+
+        draftIdRef.current = draft.draftId;
+        const restoredImages = Object.fromEntries(
+          Object.entries(draft.images).map(([position, image]) => [
+            position,
+            {
+              ...image,
+              url: URL.createObjectURL(image.file),
+            },
+          ])
+        );
+
+        Object.entries(restoredImages).forEach(([position, image]) => {
+          if (image?.url) {
+            previewUrls.set(
+              `${position}:${image.file.name}:${image.file.lastModified}`,
+              image.url
+            );
+          }
+        });
+
+        setImages((previous) => ({ ...previous, ...restoredImages }));
+        if (Object.keys(restoredImages).length) setStep(2);
+      } catch (error) {
+        console.warn("Unable to restore the body-image draft:", error);
+      }
+    }
+
+    restoreDraft();
+
+    return () => {
+      cancelled = true;
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+      previewUrls.clear();
+    };
+  }, [ownerKey]);
 
   const handleInputChange = (event) => {
     const { name, value } = event.target;
@@ -65,7 +129,21 @@ function Onboarding() {
       return;
     }
 
+    const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+    if (!allowedTypes.has(file.type)) {
+      alert("Please upload a JPG, PNG, or WebP image.");
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      alert("Each body image must be 10 MB or smaller.");
+      event.target.value = "";
+      return;
+    }
+
     const imageUrl = URL.createObjectURL(file);
+    previewUrlsRef.current.set(`${position}:${file.name}:${file.lastModified}`, imageUrl);
 
     setImages((previous) => ({
       ...previous,
@@ -74,13 +152,36 @@ function Onboarding() {
         url: imageUrl,
       },
     }));
+
+    persistDraft({
+      ...images,
+      [position]: { file },
+    }).catch((error) => {
+      console.error("Unable to persist the body-image draft:", error);
+    });
   };
 
   const removeImage = (position) => {
-    setImages((previous) => ({
-      ...previous,
+    const current = images[position];
+    if (current?.url) {
+      URL.revokeObjectURL(current.url);
+      previewUrlsRef.current.delete(`${position}:${current.file?.name}:${current.file?.lastModified}`);
+    }
+
+    const nextImages = {
+      ...images,
       [position]: null,
-    }));
+    };
+
+    setImages(nextImages);
+
+    if (Object.values(nextImages).some(Boolean)) {
+      persistDraft(nextImages)
+        .catch((error) => console.error("Unable to update the body-image draft:", error));
+    } else {
+      deleteAnalysisDraft(draftIdRef.current).catch(() => {});
+      draftIdRef.current = "";
+    }
   };
 
   const continueToImages = () => {
@@ -117,10 +218,12 @@ function Onboarding() {
 
     await updateProfile(profile);
 
+    const savedDraftId = await persistDraft(images);
+
     navigate("/analysis", {
       state: {
         analysisData: {
-          images,
+          draftId: savedDraftId,
         },
       },
     });
