@@ -54,11 +54,13 @@ function AdminModeration() {
         setImages(normalizedImages);
 
         const previewResults = await Promise.allSettled(normalizedImages.map(async (item) => {
-          const position = item.image?.images
-            ? Object.keys(item.image.images).find(
-                (key) => item.image.images[key] && item.imageAvailability?.[key] !== false
+          const position = Array.isArray(item.image?.availablePositions)
+            ? item.image.availablePositions.find(
+                (candidate) => item.imageAvailability?.[candidate] === true
               )
-            : null;
+            : Object.keys(item.image?.images || {}).find(
+                (key) => item.imageAvailability?.[key] === true
+              );
           if (!position || !item.id) return { id: item.id, position, url: null };
           try {
             const response = await getModerationImageFile(item.id, position, item.image?.images?.[position]);
@@ -107,9 +109,13 @@ function AdminModeration() {
     };
   }, []);
 
-  useEffect(() => () => {
-    previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    previewUrlsRef.current.clear();
+  useEffect(() => {
+    const previewUrls = previewUrlsRef.current;
+
+    return () => {
+      previewUrls.forEach((url) => URL.revokeObjectURL(url));
+      previewUrls.clear();
+    };
   }, []);
 
   const summary = useMemo(() => ({
@@ -216,8 +222,10 @@ function AdminModeration() {
 }
 
 function ModerationImageCard({ item, onApprove, onFlag, onDelete }) {
+  const storageMissing = item.image?.storageState === 'missing';
+
   return <article className="admin-moderation-image-card">
-    <div className={`admin-moderation-image-preview ${item.position}`}>{item.previewUrl ? <img src={item.previewUrl} alt={`${item.user} uploaded body image`} /> : <div className="admin-moderation-image-placeholder"><ImageIcon size={28} /></div>}<div className="admin-moderation-image-overlay"><span><ShieldCheck size={13} /> BODY IMAGE</span></div><StatusBadge status={item.status} /></div>
+    <div className={`admin-moderation-image-preview ${item.position}`}>{item.previewUrl ? <img src={item.previewUrl} alt={`${item.user} uploaded body image`} /> : <div className="admin-moderation-image-placeholder"><ImageIcon size={28} />{storageMissing && <small>Image unavailable</small>}</div>}<div className="admin-moderation-image-overlay"><span><ShieldCheck size={13} /> BODY IMAGE</span></div><StatusBadge status={item.status} /></div>
     <div className="admin-moderation-image-info"><div><strong>{item.user}</strong><span><Clock3 size={11} /> {item.date}</span></div><div className="admin-moderation-actions"><button type="button" onClick={onApprove}><Check size={13} /> Approve</button><button type="button" className="flag" onClick={onFlag}><Flag size={13} /> Flag</button><button type="button" className="delete" onClick={onDelete} aria-label={`Delete ${item.user} image`}><Trash2 size={13} /> Delete</button></div></div>
   </article>;
 }

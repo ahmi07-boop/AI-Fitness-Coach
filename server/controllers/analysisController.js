@@ -140,13 +140,15 @@ exports.bodyAnalysis = async (req, res) => {
       };
     }));
 
-    const result = await analyzeImages(files.map(({ file }) => file), heightCm, weightKg, landmarkViews);
-
+    // Safety classification happens before MediaPipe so flagged content never
+    // enters the fitness-analysis workflow. A moderation result is a content
+    // safety signal; it does not replace pose validation or posture scoring.
     let moderationStatus = 'Pending';
     let moderationReason = 'Manual review required.';
+    let moderationResults = [];
 
     try {
-      const moderationResults = await Promise.all(
+      moderationResults = await Promise.all(
         normalizedFiles.map((item) => moderateImage(item.buffer, item.mimeType))
       );
 
@@ -176,6 +178,38 @@ exports.bodyAnalysis = async (req, res) => {
       uploadedFileIds.push(stored.fileId);
       imagePaths[item.position] = stored.fileId;
     }
+
+    if (moderationStatus === 'Flagged') {
+      const moderationRecord = await BodyAnalysis.create({
+        userId: req.user._id,
+        viewsAnalyzed: 0,
+        totalViews: 4,
+        source: 'Image moderation',
+        images: imagePaths,
+        moderationStatus,
+        moderationReason,
+        moderatedAt: new Date(),
+        imageMetadata: normalizedFiles.reduce((acc, item, index) => {
+          acc[item.position] = {
+            width: imageMetadata[index]?.width,
+            height: imageMetadata[index]?.height,
+            contentType: item.mimeType,
+          };
+          return acc;
+        }, {}),
+      });
+
+      return res.status(422).json({
+        success: false,
+        code: 'IMAGE_MODERATION_FLAGGED',
+        message: 'One or more uploaded images require safety review before body analysis can continue.',
+        moderationStatus,
+        analysisId: String(moderationRecord._id),
+        requestId: req.requestId,
+      });
+    }
+
+    const result = await analyzeImages(files.map(({ file }) => file), heightCm, weightKg, landmarkViews);
 
     const analysis = await BodyAnalysis.create({
       userId: req.user._id,

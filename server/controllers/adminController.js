@@ -419,10 +419,11 @@ async function streamStoredAdminFile(fileId, req, res) {
 
   const file = await getFile(fileId);
   if (!file) {
-    return res.status(404).json({
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(410).json({
       success: false,
-      code: 'FILE_NOT_FOUND',
-      message: 'Image file not found.',
+      code: 'FILE_GONE',
+      message: 'Image file is no longer available.',
     });
   }
 
@@ -438,10 +439,11 @@ async function streamStoredAdminFile(fileId, req, res) {
 
   const stream = openDownloadStream(fileId);
   if (!stream) {
-    return res.status(404).json({
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(410).json({
       success: false,
-      code: 'FILE_NOT_FOUND',
-      message: 'Image file not found.',
+      code: 'FILE_GONE',
+      message: 'Image file is no longer available.',
     });
   }
 
@@ -487,20 +489,36 @@ async function getModerationFile(req, res) {
     });
   }
 
-  const referenced = await BodyAnalysis.exists({
-    $or: [
-      { 'images.front': fileId },
-      { 'images.back': fileId },
-      { 'images.left': fileId },
-      { 'images.right': fileId },
-    ],
-  });
+  const [referenced, file] = await Promise.all([
+    BodyAnalysis.exists({
+      $or: [
+        { 'images.front': fileId },
+        { 'images.back': fileId },
+        { 'images.left': fileId },
+        { 'images.right': fileId },
+      ],
+    }),
+    getFile(fileId),
+  ]);
 
   if (!referenced) {
     return res.status(404).json({
       success: false,
       code: 'FILE_NOT_REFERENCED',
       message: 'Image file is not associated with a body-analysis record.',
+      requestId: req.requestId,
+    });
+  }
+
+  if (!file) {
+    // The MongoDB document can outlive its GridFS object after a manual
+    // cleanup, migration, restore, or historical deployment. 410 tells the
+    // client that retrying the same identifier will not make the file appear.
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(410).json({
+      success: false,
+      code: 'FILE_GONE',
+      message: 'The referenced image file is no longer available.',
       requestId: req.requestId,
     });
   }
@@ -557,7 +575,10 @@ async function getImageFile(req, res) {
 }
 
 async function listImages(req, res) {
-  const images = await BodyAnalysis.find()
+  // Deleted moderation records are historical audit data, not queue items.
+  // Returning them was causing the UI to render stale file references that
+  // had already been intentionally removed by the Delete action.
+  const images = await BodyAnalysis.find({ moderationStatus: { $ne: 'Deleted' } })
     .populate('userId', 'name email')
     .sort({ createdAt: -1 })
     .limit(200)
@@ -570,10 +591,13 @@ async function listImages(req, res) {
 
   const enrichedImages = await Promise.all(images.map(async (image) => {
     const imageAvailability = {};
+    const availablePositions = [];
+    const missingPositions = [];
 
     for (const [position, value] of Object.entries(image.images || {})) {
       if (!value) {
         imageAvailability[position] = false;
+        missingPositions.push(position);
         continue;
       }
 
@@ -584,14 +608,31 @@ async function listImages(req, res) {
         imageAvailability[position] =
           isAllowedLegacyPath(resolved) && await legacyFileExists(resolved);
       }
+
+      if (imageAvailability[position]) {
+        availablePositions.push(position);
+      } else {
+        missingPositions.push(position);
+      }
     }
+
+    const storageState =
+      availablePositions.length === 0
+        ? 'missing'
+        : missingPositions.length > 0
+          ? 'partial'
+          : 'available';
 
     return {
       ...image,
       imageAvailability,
+      availablePositions,
+      missingPositions,
+      storageState,
     };
   }));
 
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
     success: true,
     count: enrichedImages.length,
