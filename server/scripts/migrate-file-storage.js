@@ -9,6 +9,7 @@ const User = require('../models/User');
 const Progress = require('../models/Progress');
 const BodyAnalysis = require('../models/BodyAnalysis');
 const { uploadBuffer, isStoredFileId, isAllowedLegacyPath } = require('../services/storageService');
+const sharp = require('sharp');
 
 async function exists(filePath) {
   try { await fs.access(filePath); return true; } catch { return false; }
@@ -20,15 +21,23 @@ function safeLegacyPath(value) {
   return isAllowedLegacyPath(resolved) ? resolved : null;
 }
 
-async function migrateFile(value, purpose, ownerUserId, contentType = 'image/webp') {
+async function migrateFile(value, purpose, ownerUserId, contentType = '') {
   if (!value || isStoredFileId(value)) return value;
   const filePath = safeLegacyPath(value);
   if (!filePath || !(await exists(filePath))) return value;
 
   const buffer = await fs.readFile(filePath);
+  let detectedContentType = contentType;
+  if (!detectedContentType) {
+    const metadata = await sharp(buffer, { failOn: 'error' }).metadata();
+    const format = String(metadata.format || '').toLowerCase();
+    detectedContentType = ({ jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', avif: 'image/avif' }[format]) || 'application/octet-stream';
+  }
+  if (!detectedContentType.startsWith('image/')) throw new Error(`Unsupported legacy image format: ${detectedContentType}`);
+
   const stored = await uploadBuffer(buffer, {
     filename: path.basename(filePath),
-    contentType,
+    contentType: detectedContentType,
     metadata: {
       ownerUserId: String(ownerUserId || ''),
       purpose,

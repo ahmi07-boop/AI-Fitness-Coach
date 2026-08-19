@@ -53,3 +53,20 @@ The release archive intentionally excludes:
 Safe `.env.example` templates are included.
 
 If any production credentials have previously been exposed in a ZIP, screenshot, log, or other shared artifact, rotate those credentials immediately.
+
+# Release notes — moderation image rendering fix
+
+## Root cause
+
+The moderation queue contained legacy `server/uploads` references after the application moved body-image storage to MongoDB GridFS. Railway's filesystem is not durable across deployments. The frontend therefore received valid moderation records but no renderable image object for many historical records.
+
+## Remediation
+
+- Automatic legacy body-image migration to GridFS when legacy files are present.
+- Atomic reference replacement to prevent duplicate migration races.
+- Stronger GridFS image MIME handling for legacy objects.
+- Exclusion of deleted moderation records from the active queue.
+- Explicit `availablePositions`, `missingPositions`, and `storageState` in the moderation API.
+- `Cache-Control: no-store` on the moderation queue response.
+- Frontend rendering now distinguishes loading, unavailable, and failed image states.
+- Existing MediaPipe, moderation, authentication, plans, billing, and other application settings are preserved.

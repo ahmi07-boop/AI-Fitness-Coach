@@ -1,5 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
+const sharp = require('sharp');
 const User = require('../models/User');
 const Plan = require('../models/Plan');
 const Progress = require('../models/Progress');
@@ -9,7 +10,7 @@ const AdminLog = require('../models/AdminLog');
 const AIUsageLog = require('../models/AIUsageLog');
 const PromptTemplate = require('../models/PromptTemplate');
 const PlanTemplate = require('../models/PlanTemplate');
-const { getFile, getFiles, openDownloadStream, deleteFile, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
+const { getFile, getFiles, openDownloadStream, deleteFile, uploadBuffer, isStoredFileId, isAllowedLegacyPath, legacyFileExists } = require('../services/storageService');
 
 const REPORT_TIMEZONE = process.env.APP_TIMEZONE || 'UTC';
 
@@ -419,15 +420,35 @@ async function streamStoredAdminFile(fileId, req, res) {
 
   const file = await getFile(fileId);
   if (!file) {
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(410).json({
+    return res.status(404).json({
       success: false,
-      code: 'FILE_GONE',
-      message: 'Image file is no longer available.',
+      code: 'FILE_NOT_FOUND',
+      message: 'Image file not found.',
     });
   }
 
-  const contentType = String(file.contentType || file.metadata?.contentType || 'application/octet-stream');
+  const declaredContentType = String(file.contentType || file.metadata?.contentType || '').toLowerCase();
+  const extensionContentTypes = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.avif': 'image/avif',
+    '.gif': 'image/gif',
+  };
+  const extension = path.extname(String(file.filename || '')).toLowerCase();
+  const contentType = declaredContentType.startsWith('image/')
+    ? declaredContentType
+    : extensionContentTypes[extension] || '';
+
+  if (!contentType) {
+    return res.status(415).json({
+      success: false,
+      code: 'UNSUPPORTED_IMAGE_CONTENT_TYPE',
+      message: 'Stored moderation object is not a recognized image.',
+      requestId: req.requestId,
+    });
+  }
   const length = Number(file.length);
 
   res.setHeader('Content-Type', contentType);
@@ -435,15 +456,15 @@ async function streamStoredAdminFile(fileId, req, res) {
     res.setHeader('Content-Length', String(length));
   }
   res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Disposition', `inline; filename="${String(file.filename || 'image').replace(/["\\\r\n]/g, '_')}"`);
 
   const stream = openDownloadStream(fileId);
   if (!stream) {
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(410).json({
+    return res.status(404).json({
       success: false,
-      code: 'FILE_GONE',
-      message: 'Image file is no longer available.',
+      code: 'FILE_NOT_FOUND',
+      message: 'Image file not found.',
     });
   }
 
@@ -489,36 +510,20 @@ async function getModerationFile(req, res) {
     });
   }
 
-  const [referenced, file] = await Promise.all([
-    BodyAnalysis.exists({
-      $or: [
-        { 'images.front': fileId },
-        { 'images.back': fileId },
-        { 'images.left': fileId },
-        { 'images.right': fileId },
-      ],
-    }),
-    getFile(fileId),
-  ]);
+  const referenced = await BodyAnalysis.exists({
+    $or: [
+      { 'images.front': fileId },
+      { 'images.back': fileId },
+      { 'images.left': fileId },
+      { 'images.right': fileId },
+    ],
+  });
 
   if (!referenced) {
     return res.status(404).json({
       success: false,
       code: 'FILE_NOT_REFERENCED',
       message: 'Image file is not associated with a body-analysis record.',
-      requestId: req.requestId,
-    });
-  }
-
-  if (!file) {
-    // The MongoDB document can outlive its GridFS object after a manual
-    // cleanup, migration, restore, or historical deployment. 410 tells the
-    // client that retrying the same identifier will not make the file appear.
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(410).json({
-      success: false,
-      code: 'FILE_GONE',
-      message: 'The referenced image file is no longer available.',
       requestId: req.requestId,
     });
   }
@@ -574,15 +579,73 @@ async function getImageFile(req, res) {
   });
 }
 
+async function migrateLegacyModerationImages(images) {
+  if (process.env.AUTO_MIGRATE_LEGACY_BODY_IMAGES === 'false') return;
+
+  for (const image of images) {
+    for (const position of ['front', 'back', 'left', 'right']) {
+      const current = image.images?.[position];
+      if (!current || isStoredFileId(current)) continue;
+
+      const resolved = path.resolve(String(current));
+      if (!isAllowedLegacyPath(resolved) || !(await legacyFileExists(resolved))) continue;
+
+      try {
+        const buffer = await fs.readFile(resolved);
+        if (!buffer.length) continue;
+
+        const metadata = await sharp(buffer, { failOn: 'error' }).metadata();
+        const format = String(metadata.format || '').toLowerCase();
+        const contentType = image.imageMetadata?.[position]?.contentType
+          || ({ jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', avif: 'image/avif' }[format])
+          || 'application/octet-stream';
+
+        if (!contentType.startsWith('image/')) continue;
+
+        const stored = await uploadBuffer(buffer, {
+          filename: `${String(image.userId?._id || image.userId || 'user')}-${position}-${Date.now()}.${format || 'img'}`,
+          contentType,
+          metadata: {
+            ownerUserId: String(image.userId?._id || image.userId || ''),
+            purpose: `body-analysis-${position}`,
+            migratedFromLocalStorage: true,
+            sourcePath: path.basename(resolved),
+          },
+        });
+
+        const updateResult = await BodyAnalysis.updateOne(
+          { _id: image._id, [`images.${position}`]: current },
+          { $set: { [`images.${position}`]: stored.fileId } }
+        );
+
+        if (updateResult.modifiedCount === 1) {
+          image.images[position] = stored.fileId;
+        } else {
+          await deleteFile(stored.fileId).catch(() => {});
+        }
+      } catch (error) {
+        console.warn(`Legacy moderation image migration failed for ${image._id} ${position}:`, error.message);
+      }
+    }
+
+    // Each migrated position is persisted atomically above so concurrent admin
+    // page loads cannot create competing GridFS references.
+  }
+}
+
 async function listImages(req, res) {
-  // Deleted moderation records are historical audit data, not queue items.
-  // Returning them was causing the UI to render stale file references that
-  // had already been intentionally removed by the Delete action.
   const images = await BodyAnalysis.find({ moderationStatus: { $ne: 'Deleted' } })
     .populate('userId', 'name email')
     .sort({ createdAt: -1 })
     .limit(200)
     .lean();
+
+  // Legacy Railway deployments stored body images under server/uploads. When
+  // those files are still present during a deployment, transparently migrate
+  // them into GridFS so the moderation UI becomes durable without a manual
+  // per-image repair operation. Missing legacy files are never fabricated or
+  // silently replaced.
+  await migrateLegacyModerationImages(images);
 
   const storedIds = images.flatMap((image) =>
     Object.values(image.images || {}).filter((value) => isStoredFileId(value))
@@ -591,13 +654,10 @@ async function listImages(req, res) {
 
   const enrichedImages = await Promise.all(images.map(async (image) => {
     const imageAvailability = {};
-    const availablePositions = [];
-    const missingPositions = [];
 
     for (const [position, value] of Object.entries(image.images || {})) {
       if (!value) {
         imageAvailability[position] = false;
-        missingPositions.push(position);
         continue;
       }
 
@@ -608,27 +668,17 @@ async function listImages(req, res) {
         imageAvailability[position] =
           isAllowedLegacyPath(resolved) && await legacyFileExists(resolved);
       }
-
-      if (imageAvailability[position]) {
-        availablePositions.push(position);
-      } else {
-        missingPositions.push(position);
-      }
     }
 
-    const storageState =
-      availablePositions.length === 0
-        ? 'missing'
-        : missingPositions.length > 0
-          ? 'partial'
-          : 'available';
+    const availablePositions = Object.keys(imageAvailability).filter((position) => imageAvailability[position]);
+    const missingPositions = Object.keys(imageAvailability).filter((position) => !imageAvailability[position]);
 
     return {
       ...image,
       imageAvailability,
       availablePositions,
       missingPositions,
-      storageState,
+      storageState: availablePositions.length === 0 ? 'missing' : missingPositions.length ? 'partial' : 'available',
     };
   }));
 

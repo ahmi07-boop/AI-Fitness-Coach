@@ -50,17 +50,17 @@ function AdminModeration() {
           image: item,
           previewUrl: null,
           imageAvailability: item.imageAvailability || {},
+          availablePositions: Array.isArray(item.availablePositions) ? item.availablePositions : [],
+          storageState: item.storageState || 'unknown',
+          previewError: false,
         }));
         setImages(normalizedImages);
 
         const previewResults = await Promise.allSettled(normalizedImages.map(async (item) => {
-          const position = Array.isArray(item.image?.availablePositions)
-            ? item.image.availablePositions.find(
-                (candidate) => item.imageAvailability?.[candidate] === true
-              )
-            : Object.keys(item.image?.images || {}).find(
-                (key) => item.imageAvailability?.[key] === true
-              );
+          const position = item.image?.images
+            ? (item.availablePositions?.find((key) => item.image.images[key])
+              || Object.keys(item.image.images).find((key) => item.image.images[key] && item.imageAvailability?.[key] !== false))
+            : null;
           if (!position || !item.id) return { id: item.id, position, url: null };
           try {
             const response = await getModerationImageFile(item.id, position, item.image?.images?.[position]);
@@ -68,14 +68,14 @@ function AdminModeration() {
             previewUrlsRef.current.set(item.id, url);
             return { id: item.id, position, url };
           } catch {
-            return { id: item.id, position, url: null };
+            return { id: item.id, position, url: null, error: true };
           }
         }));
 
         if (!cancelled) {
           setImages((current) => current.map((item) => {
             const result = previewResults.find((entry) => entry.status === "fulfilled" && entry.value.id === item.id);
-            return result ? { ...item, position: result.value.position || item.position, previewUrl: result.value.url } : item;
+            return result ? { ...item, position: result.value.position || item.position, previewUrl: result.value.url, previewError: Boolean(result.value.error) } : item;
           }));
         }
       } else {
@@ -111,7 +111,6 @@ function AdminModeration() {
 
   useEffect(() => {
     const previewUrls = previewUrlsRef.current;
-
     return () => {
       previewUrls.forEach((url) => URL.revokeObjectURL(url));
       previewUrls.clear();
@@ -222,10 +221,8 @@ function AdminModeration() {
 }
 
 function ModerationImageCard({ item, onApprove, onFlag, onDelete }) {
-  const storageMissing = item.image?.storageState === 'missing';
-
   return <article className="admin-moderation-image-card">
-    <div className={`admin-moderation-image-preview ${item.position}`}>{item.previewUrl ? <img src={item.previewUrl} alt={`${item.user} uploaded body image`} /> : <div className="admin-moderation-image-placeholder"><ImageIcon size={28} />{storageMissing && <small>Image unavailable</small>}</div>}<div className="admin-moderation-image-overlay"><span><ShieldCheck size={13} /> BODY IMAGE</span></div><StatusBadge status={item.status} /></div>
+    <div className={`admin-moderation-image-preview ${item.position}`}>{item.previewUrl ? <img src={item.previewUrl} alt={`${item.user} uploaded body image`} onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : <div className="admin-moderation-image-placeholder"><ImageIcon size={28} /><span>{item.storageState === 'missing' ? 'Image unavailable' : item.previewError ? 'Unable to load image' : 'Loading image'}</span></div>}<div className="admin-moderation-image-overlay"><span><ShieldCheck size={13} /> BODY IMAGE</span></div><StatusBadge status={item.status} /></div>
     <div className="admin-moderation-image-info"><div><strong>{item.user}</strong><span><Clock3 size={11} /> {item.date}</span></div><div className="admin-moderation-actions"><button type="button" onClick={onApprove}><Check size={13} /> Approve</button><button type="button" className="flag" onClick={onFlag}><Flag size={13} /> Flag</button><button type="button" className="delete" onClick={onDelete} aria-label={`Delete ${item.user} image`}><Trash2 size={13} /> Delete</button></div></div>
   </article>;
 }
